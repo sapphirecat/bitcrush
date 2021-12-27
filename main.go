@@ -30,8 +30,11 @@ func init() {
 	flag.BoolVar(&config.BT470, "sd", false, "Use SDTV BT.470 luma weights instead of BT.703")
 }
 
+// FMUL is the factor between color.RGBA and normalized floats
 const FMUL = 65535.0
 
+// straightAlphaFloat turns a color.Color into normalized float32 components
+// with straight (not premultiplied) alpha.
 func straightAlphaFloat(c color.Color) (float32, float32, float32, float32) {
 	r, g, b, a := c.RGBA()
 
@@ -43,15 +46,20 @@ func straightAlphaFloat(c color.Color) (float32, float32, float32, float32) {
 	return rF / aF, gF / aF, bF / aF, aF
 }
 
+// diffuseFloydSteinberg implements the error diffusion algorithm on a window
+// of rows.
 func diffuseFloydSteinberg(errorRows *[2][]float32, ox int, yerr float32) {
-	errorRows[0][ox+1] += yerr * (7.0 / 16)
 	if ox > 0 {
 		errorRows[1][ox-1] += yerr * (3.0 / 16)
 	}
 	errorRows[1][ox] += yerr * (5.0 / 16)
-	errorRows[1][ox+1] += yerr * (1.0 / 16)
+	if ox < len(errorRows[0])-1 {
+		errorRows[0][ox+1] += yerr * (7.0 / 16)
+		errorRows[1][ox+1] += yerr * (1.0 / 16)
+	}
 }
 
+// Process processes the image according to the configuration.
 func Process(config Config) {
 	// Decode the image data from a file
 	reader, err := os.Open(config.SourceFile)
@@ -73,8 +81,7 @@ func Process(config Config) {
 	o := image.NewRGBA(image.Rect(0, 0, w, h))
 	var errorRows [2][]float32
 	for i := range errorRows {
-		// make it 1 wider: no upper bounds check needed
-		errorRows[i] = make([]float32, 1+w)
+		errorRows[i] = make([]float32, w)
 	}
 	for y := yMin; y < yMax; y++ {
 		// slide error diffusion window upward: copy(dst, src)
