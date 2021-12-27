@@ -5,6 +5,9 @@ import (
 	"image"
 	"log"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 
 	// Specific image-types are not used explicitly in the code below,
 	// but importing registers them for use with image.Decode.
@@ -165,12 +168,48 @@ func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
 	}
 }
 
-func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
-	//space := config.Space
-	// do cool parsing & construction stuff here
+func parseBits(channels int, bits []int, from string) []int {
+	if len(from) < channels {
+		log.Fatal("Not enough channels specified in: ", from)
+	} else if len(from) > channels {
+		log.Fatal("Too many channels specified in: ", from)
+	}
 
-	//qFunc = quantizerGray([]int{4}, ctx, config)
-	return quantizerRgb([]int{3, 3, 2}, ctx, config)
+	for i := 0; i < channels; i += 1 {
+		v, err := strconv.Atoi(from[i : i+1])
+		if err != nil {
+			log.Fatalf("Channel at %d could not be parsed: %s", i, from[i:i+1])
+		}
+
+		bits = append(bits, v)
+	}
+
+	return bits
+}
+
+func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
+	re := regexp.MustCompile(`^(?i)([a-z]+)([1-9]+)$`)
+	var builder QuantizeBuilder
+
+	m := re.FindStringSubmatch(config.Space)
+	if m == nil {
+		log.Fatal("Could not parse colorspace: ", config.Space)
+	}
+
+	channels := 3
+	bits := make([]int, 0, 3)
+	switch strings.ToUpper(m[1]) {
+	case "Y":
+		channels = 1
+		builder = quantizerGray
+	case "RGB":
+		builder = quantizerRgb
+	default:
+		log.Fatal("Unknown color space: ", m[1])
+	}
+
+	bits = parseBits(channels, bits, m[2])
+	return builder(bits, ctx, config)
 }
 
 func ProcessImage(m image.Image, qFunc PixelQuantizer, ctx *dither) *image.RGBA {
