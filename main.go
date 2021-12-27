@@ -23,6 +23,9 @@ type Config struct {
 
 type ErrorValue [3]float32
 type Errors [2][]ErrorValue
+type FloatRGBA struct {
+	R, G, B, A float32
+}
 
 var config = Config{}
 
@@ -36,17 +39,22 @@ func init() {
 // FMUL is the factor between color.RGBA and normalized floats
 const FMUL = 65535.0
 
+// FMUL8 is the factor between normalized floats and 8-bit representations
+const FMUL8 = 255.0
+
 // straightAlphaFloat turns a color.Color into normalized float32 components
 // with straight (not premultiplied) alpha.
-func straightAlphaFloat(c color.Color) (float32, float32, float32, float32) {
+func straightAlphaFloat(c color.Color) FloatRGBA {
 	r, g, b, a := c.RGBA()
+	aDiv := float32(a)
 
-	rF := float32(r) / FMUL
-	gF := float32(g) / FMUL
-	bF := float32(b) / FMUL
-	aF := float32(a) / FMUL
-
-	return rF / aF, gF / aF, bF / aF, aF
+	// for the RGB components, FMUL cancels out: (r/FMUL) / (a/FMUL) = r/a
+	return FloatRGBA{
+		R: float32(r) / aDiv,
+		G: float32(g) / aDiv,
+		B: float32(b) / aDiv,
+		A: aDiv / FMUL,
+	}
 }
 
 // diffuseFloydSteinberg implements the error diffusion algorithm on a window
@@ -97,34 +105,41 @@ func Process(config Config) {
 		}
 
 		for x := xMin; x < xMax; x++ {
-			// A color's RGBA method returns values in the range [0, 65535],
-			// with premultiplied alpha.  Convert to normalized float32 with
-			// with straight alpha.
-			r, g, b, a := straightAlphaFloat(m.At(x, y))
+			clr := straightAlphaFloat(m.At(x, y))
 
+			// compute output-relative X/Y coordinates
 			ox := x - xMin
 			oy := y - yMin
 
+			// compute the full-precision grayscale
 			var y0 float32
 			if config.BT470 {
-				y0 = float32(0.299*r + 0.587*g + 0.114*b) // BT.470
+				y0 = float32(0.299*clr.R + 0.587*clr.G + 0.114*clr.B) // BT.470
 			} else {
-				y0 = float32(0.2126*r + 0.7152*g + 0.0722*b) // BT.709
+				y0 = float32(0.2126*clr.R + 0.7152*clr.G + 0.0722*clr.B) // BT.709
 			}
-			// quantize, with error diffusion included
+
+			// quantize (0..15 => 16 levels)
 			yflr := mat32.RoundToEven((y0+errorRows[0][ox][0])*15) / 15
-			delta := y0 - yflr
 			if !config.Flat {
+				// do error diffusion (dither)
+				delta := y0 - yflr
 				diffuseFloydSteinberg(&errorRows, ox, ErrorValue{delta, delta, delta})
 			}
 
+			// saturate
 			if yflr > 1.0 {
 				yflr = 1.0
 			} else if yflr < 0.0 {
 				yflr = 0.0
 			}
-			yq := uint8(yflr * 255.0)
-			o.Set(ox, oy, color.RGBA{yq, yq, yq, uint8(a * FMUL)})
+
+			// convert to output space
+			yq := uint8(yflr * FMUL8)
+			clrOut := color.RGBA{yq, yq, yq, uint8(clr.A * FMUL8)}
+
+			// set on the output
+			o.Set(ox, oy, clrOut)
 		}
 	}
 
