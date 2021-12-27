@@ -23,6 +23,7 @@ type Config struct {
 }
 
 type PixelQuantizer func(FloatRGBA) color.RGBA
+type QuantizeBuilder func([]int, *dither, Config) PixelQuantizer
 type ErrorValue [3]float32
 type Errors [2][]ErrorValue
 type FloatRGBA struct {
@@ -34,14 +35,14 @@ type dither struct {
 	e Errors
 }
 
-var config = Config{}
+var fConfig = Config{}
 
 func init() {
-	flag.StringVar(&config.SourceFile, "in", "img.png", "Source image to process")
-	flag.StringVar(&config.OutputFile, "out", "output.png", "Output image file name")
-	flag.StringVar(&config.Space, "space", "Y4", "Color space and quantization to use, e.g. RGB332")
-	flag.BoolVar(&config.Flat, "flat", false, "Skip dithering")
-	flag.BoolVar(&config.BT470, "sd", false, "Use SDTV BT.470 luma weights instead of BT.703")
+	flag.StringVar(&fConfig.SourceFile, "in", "img.png", "Source image to process")
+	flag.StringVar(&fConfig.OutputFile, "out", "output.png", "Output image file name")
+	flag.StringVar(&fConfig.Space, "space", "Y4", "Color space and quantization to use, e.g. RGB332")
+	flag.BoolVar(&fConfig.Flat, "flat", false, "Skip dithering")
+	flag.BoolVar(&fConfig.BT470, "sd", false, "Use SDTV BT.470 luma weights instead of BT.703")
 }
 
 // FMUL is the factor between color.RGBA and normalized floats
@@ -86,11 +87,30 @@ func diffuseFloydSteinberg(errorRows *Errors, ox int, errVec ErrorValue) {
 }
 
 func levelsForBits(bits int) int {
+	if bits < 0 {
+		panic("negative bits requested")
+	}
+
 	return (1 << bits) - 1
 }
 
-func quantizerGray(bits int, ctx *dither) PixelQuantizer {
-	levels := float32(levelsForBits(bits))
+func int8OfFloat(value float32) uint8 {
+	if value <= 0.0 {
+		return 0
+	}
+	if value > (1.0 - 1/256) {
+		return 255
+	}
+
+	return uint8(value * FMUL8)
+}
+
+func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
+	if len(bits) < 1 {
+		panic("not enough bits specified for Y channel")
+	}
+
+	levels := float32(levelsForBits(bits[0]))
 
 	return func(clr FloatRGBA) color.RGBA {
 		// compute the full-precision grayscale
@@ -101,23 +121,47 @@ func quantizerGray(bits int, ctx *dither) PixelQuantizer {
 			y0 = float32(0.2126*clr.R + 0.7152*clr.G + 0.0722*clr.B) // BT.709
 		}
 
-		// quantize (0..15 => 16 levels)
+		// quantize
 		yflr := mat32.RoundToEven((y0+ctx.e[0][ctx.x][0])*levels) / levels
 		if !config.Flat {
-			// do error diffusion (dither)
 			diffuseFloydSteinberg(&ctx.e, ctx.x, ErrorValue{y0 - yflr})
 		}
 
-		// saturate
-		if yflr > 1.0 {
-			yflr = 1.0
-		} else if yflr < 0.0 {
-			yflr = 0.0
+		// convert to output space
+		yq := int8OfFloat(yflr)
+		return color.RGBA{R: yq, G: yq, B: yq, A: uint8(clr.A * FMUL8)}
+	}
+}
+
+func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
+	var levels [3]float32
+
+	if len(bits) < 3 {
+		panic("not enough bits for RGB channels")
+	}
+
+	for i := range levels {
+		levels[i] = float32(levelsForBits(bits[i]))
+	}
+
+	return func(clr FloatRGBA) color.RGBA {
+		x := ctx.x
+
+		rF := mat32.RoundToEven((clr.R+ctx.e[0][x][0])*levels[0]) / levels[0]
+		gF := mat32.RoundToEven((clr.G+ctx.e[0][x][1])*levels[1]) / levels[1]
+		bF := mat32.RoundToEven((clr.B+ctx.e[0][x][2])*levels[2]) / levels[2]
+
+		if !config.Flat {
+			eVal := ErrorValue{clr.R - rF, clr.G - gF, clr.B - bF}
+			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
 		}
 
-		// convert to output space
-		yq := uint8(yflr * FMUL8)
-		return color.RGBA{yq, yq, yq, uint8(clr.A * FMUL8)}
+		return color.RGBA{
+			R: int8OfFloat(rF),
+			G: int8OfFloat(gF),
+			B: int8OfFloat(bF),
+			A: uint8(clr.A * FMUL8),
+		}
 	}
 }
 
@@ -142,7 +186,10 @@ func Process(config Config) {
 	h := bounds.Max.Y - yMin
 	o := image.NewRGBA(image.Rect(0, 0, w, h))
 	var dCtx dither
-	qFunc := quantizerGray(4, &dCtx)
+	var qFunc PixelQuantizer
+
+	//qFunc = quantizerGray([]int{4}, &dCtx, config)
+	qFunc = quantizerRgb([]int{3, 3, 2}, &dCtx, config)
 
 	for i := range dCtx.e {
 		dCtx.e[i] = make([]ErrorValue, w)
@@ -180,5 +227,5 @@ func Process(config Config) {
 
 func main() {
 	flag.Parse()
-	Process(config)
+	Process(fConfig)
 }
