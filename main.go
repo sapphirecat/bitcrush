@@ -165,17 +165,15 @@ func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
 	}
 }
 
-// Process processes the image according to the configuration.
-func Process(config Config) {
-	// Decode the image data from a file
-	reader, err := os.Open(config.SourceFile)
-	if err != nil {
-		log.Fatal(err)
-	}
-	m, _, err := image.Decode(reader)
-	if err != nil {
-		log.Fatal(err)
-	}
+func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
+	//space := config.Space
+	// do cool parsing & construction stuff here
+
+	//qFunc = quantizerGray([]int{4}, ctx, config)
+	return quantizerRgb([]int{3, 3, 2}, ctx, config)
+}
+
+func ProcessImage(m image.Image, qFunc PixelQuantizer, ctx *dither) *image.RGBA {
 	bounds := m.Bounds()
 
 	xMin := bounds.Min.X
@@ -185,21 +183,16 @@ func Process(config Config) {
 	w := xMax - xMin
 	h := bounds.Max.Y - yMin
 	o := image.NewRGBA(image.Rect(0, 0, w, h))
-	var dCtx dither
-	var qFunc PixelQuantizer
 
-	//qFunc = quantizerGray([]int{4}, &dCtx, config)
-	qFunc = quantizerRgb([]int{3, 3, 2}, &dCtx, config)
-
-	for i := range dCtx.e {
-		dCtx.e[i] = make([]ErrorValue, w)
+	for i := range ctx.e {
+		ctx.e[i] = make([]ErrorValue, w)
 	}
 	for y := yMin; y < yMax; y++ {
 		// slide error diffusion window upward: copy(dst, src)
-		copy(dCtx.e[0], dCtx.e[1])
+		copy(ctx.e[0], ctx.e[1])
 		// fill newly-available window with 0
-		for i := range dCtx.e[1] {
-			dCtx.e[1][i] = ErrorValue{}
+		for i := range ctx.e[1] {
+			ctx.e[1][i] = ErrorValue{}
 		}
 
 		// compute output-relative Y coordinate
@@ -207,12 +200,34 @@ func Process(config Config) {
 		for x := xMin; x < xMax; x++ {
 			// compute output-relative X coordinate
 			ox := x - xMin
-			dCtx.x = ox
+			ctx.x = ox
 
 			clr := straightAlphaFloat(m.At(x, y))
 			o.Set(ox, oy, qFunc(clr))
 		}
 	}
+
+	return o
+}
+
+// Process processes the image according to the configuration.
+func Process(config Config) {
+	// set up quantization color space and channel depths
+	var dCtx dither
+	qFunc := resolveQuantizer(&dCtx, config)
+
+	// Decode the image data from a file
+	reader, err := os.Open(config.SourceFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	m, _, err := image.Decode(reader)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Process (convert/quantize/maybe-dither/return) the image
+	o := ProcessImage(m, qFunc, &dCtx)
 
 	// Open the output
 	writer, err := os.Create(config.OutputFile)
