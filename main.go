@@ -4,7 +4,6 @@ import (
 	"flag"
 	"image"
 	"log"
-	"math"
 	"os"
 
 	// Specific image-types are not used explicitly in the code below,
@@ -14,6 +13,8 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	"image/png"
+
+	"github.com/goki/mat32"
 )
 
 var SourceFile = flag.String("in", "img.png", "Source image to process")
@@ -34,7 +35,7 @@ func straightAlphaFloat(c color.Color) (float32, float32, float32, float32) {
 	return rF / aF, gF / aF, bF / aF, aF
 }
 
-func diffuseFloydSteinberg(errorRows *[2][]float64, ox int, yerr float64) {
+func diffuseFloydSteinberg(errorRows *[2][]float32, ox int, yerr float32) {
 	errorRows[0][ox+1] += yerr * (7.0 / 16)
 	if ox > 0 {
 		errorRows[1][ox-1] += yerr * (3.0 / 16)
@@ -43,7 +44,7 @@ func diffuseFloydSteinberg(errorRows *[2][]float64, ox int, yerr float64) {
 	errorRows[1][ox+1] += yerr * (1.0 / 16)
 }
 
-func diffuseBitCrush(errorRows *[2][]float64, ox int, yerr float64) {
+func diffuseBitCrush(errorRows *[2][]float32, ox int, yerr float32) {
 	errorRows[0][ox+1] += yerr * 0.5
 	errorRows[1][ox] = yerr * 0.5
 }
@@ -74,10 +75,10 @@ func main() {
 	w := xMax - xMin
 	h := bounds.Max.Y - yMin
 	o := image.NewRGBA(image.Rect(0, 0, w, h))
-	var errorRows [2][]float64
+	var errorRows [2][]float32
 	for i := range errorRows {
 		// we are going to make the rows 1 wider, so writing always works
-		errorRows[i] = make([]float64, 1+w)
+		errorRows[i] = make([]float32, 1+w)
 	}
 	for y := yMin; y < yMax; y++ {
 		// slide error diffusion window upward: copy(dst, src)
@@ -96,14 +97,14 @@ func main() {
 			ox := x - xMin
 			oy := y - yMin
 
-			var y0 float64
+			var y0 float32
 			if BT470 != nil && *BT470 {
-				y0 = float64(0.299*r + 0.587*g + 0.114*b) // BT.470
+				y0 = float32(0.299*r + 0.587*g + 0.114*b) // BT.470
 			} else {
-				y0 = float64(0.2126*r + 0.7152*g + 0.0722*b) // BT.709
+				y0 = float32(0.2126*r + 0.7152*g + 0.0722*b) // BT.709
 			}
 			// quantize, with error diffusion included
-			yflr := math.RoundToEven((y0+errorRows[0][ox])*15) / 15
+			yflr := mat32.RoundToEven((y0+errorRows[0][ox])*15) / 15
 			if WithDiffusion == nil || *WithDiffusion {
 				diffuseFloydSteinberg(&errorRows, ox, y0-yflr)
 				//diffuseBitCrush(&errorRows, ox, y0-yflr)
