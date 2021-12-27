@@ -7,8 +7,7 @@ import (
 	"os"
 
 	// Specific image-types are not used explicitly in the code below,
-	// but are imported for its initialization side-effect, which allows
-	// image.Decode to understand these image formats.
+	// but importing registers them for use with image.Decode.
 	"image/color"
 	_ "image/gif"
 	_ "image/jpeg"
