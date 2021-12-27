@@ -18,8 +18,10 @@ import (
 
 var SourceFile = flag.String("in", "img.png", "Source image to process")
 var OutputFile = flag.String("out", "output.png", "Output image file name")
+var WithDiffusion = flag.Bool("dither", true, "FALSE to disable dithering")
+var BT470 = flag.Bool("sd", false, "TRUE to enable SDTV BT.470 luma weights")
 
-const FMUL = 65536.0
+const FMUL = 65535.0
 
 func straightAlphaFloat(c color.Color) (float32, float32, float32, float32) {
 	r, g, b, a := c.RGBA()
@@ -94,18 +96,25 @@ func main() {
 			ox := x - xMin
 			oy := y - yMin
 
-			y0 := float64(0.299*r + 0.587*g + 0.114*b)
+			var y0 float64
+			if BT470 != nil && *BT470 {
+				y0 = float64(0.299*r + 0.587*g + 0.114*b) // BT.470
+			} else {
+				y0 = float64(0.2126*r + 0.7152*g + 0.0722*b) // BT.709
+			}
 			// quantize, with error diffusion included
-			yflr := math.Floor((y0+errorRows[0][ox])*16) / 16
-			diffuseFloydSteinberg(&errorRows, ox, y0-yflr)
-			//diffuseBitCrush(&errorRows, ox, y0-yflr)
+			yflr := math.RoundToEven((y0+errorRows[0][ox])*15) / 15
+			if WithDiffusion == nil || *WithDiffusion {
+				diffuseFloydSteinberg(&errorRows, ox, y0-yflr)
+				//diffuseBitCrush(&errorRows, ox, y0-yflr)
+			}
 
-			if yflr > 255.0/256 {
-				yflr = 255.0 / 256
+			if yflr > 1.0 {
+				yflr = 1.0
 			} else if yflr < 0.0 {
 				yflr = 0.0
 			}
-			yq := uint8(yflr * 256.0)
+			yq := uint8(yflr * 255.0)
 			o.Set(ox, oy, color.RGBA{yq, yq, yq, uint8(a * FMUL)})
 		}
 	}
