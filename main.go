@@ -4,6 +4,7 @@ import (
 	"flag"
 	"image"
 	"log"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -15,8 +16,6 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	"image/png"
-
-	"github.com/goki/mat32"
 )
 
 type Config struct {
@@ -27,10 +26,10 @@ type Config struct {
 
 type PixelQuantizer func(FloatRGBA) color.RGBA
 type QuantizeBuilder func([]int, *dither, Config) PixelQuantizer
-type ErrorValue [3]float32
+type ErrorValue [3]float64
 type Errors [2][]ErrorValue
 type FloatRGBA struct {
-	R, G, B, A float32
+	R, G, B, A float64
 }
 
 type dither struct {
@@ -54,17 +53,17 @@ const FMUL = 65535.0
 // FMUL8 is the factor between normalized floats and 8-bit representations
 const FMUL8 = 255.0
 
-// straightAlphaFloat turns a color.Color into normalized float32 components
+// straightAlphaFloat turns a color.Color into normalized float64 components
 // with straight (not premultiplied) alpha.
 func straightAlphaFloat(c color.Color) FloatRGBA {
 	r, g, b, a := c.RGBA()
-	aDiv := float32(a)
+	aDiv := float64(a)
 
 	// for the RGB components, FMUL cancels out: (r/FMUL) / (a/FMUL) = r/a
 	return FloatRGBA{
-		R: float32(r) / aDiv,
-		G: float32(g) / aDiv,
-		B: float32(b) / aDiv,
+		R: float64(r) / aDiv,
+		G: float64(g) / aDiv,
+		B: float64(b) / aDiv,
 		A: aDiv / FMUL,
 	}
 }
@@ -89,15 +88,16 @@ func diffuseFloydSteinberg(errorRows *Errors, ox int, errVec ErrorValue) {
 	}
 }
 
-func levelsForBits(bits int) int {
+func levelsForBits(bits int) float64 {
 	if bits < 0 {
 		panic("negative bits requested")
 	}
 
-	return (1 << bits) - 1
+	levels := (1 << bits) - 1
+	return float64(levels)
 }
 
-func int8OfFloat(value float32) uint8 {
+func int8OfFloat(value float64) uint8 {
 	if value <= 0.0 {
 		return 0
 	}
@@ -113,19 +113,19 @@ func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
 		panic("not enough bits specified for Y channel")
 	}
 
-	levels := float32(levelsForBits(bits[0]))
+	levels := levelsForBits(bits[0])
 
 	return func(clr FloatRGBA) color.RGBA {
 		// compute the full-precision grayscale
-		var y0 float32
+		var y0 float64
 		if config.BT470 {
-			y0 = float32(0.299*clr.R + 0.587*clr.G + 0.114*clr.B) // BT.470
+			y0 = float64(0.299*clr.R + 0.587*clr.G + 0.114*clr.B) // BT.470
 		} else {
-			y0 = float32(0.2126*clr.R + 0.7152*clr.G + 0.0722*clr.B) // BT.709
+			y0 = float64(0.2126*clr.R + 0.7152*clr.G + 0.0722*clr.B) // BT.709
 		}
 
 		// quantize
-		yflr := mat32.RoundToEven((y0+ctx.e[0][ctx.x][0])*levels) / levels
+		yflr := math.RoundToEven((y0+ctx.e[0][ctx.x][0])*levels) / levels
 		if !config.Flat {
 			diffuseFloydSteinberg(&ctx.e, ctx.x, ErrorValue{y0 - yflr})
 		}
@@ -137,22 +137,22 @@ func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
 }
 
 func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
-	var levels [3]float32
+	var levels [3]float64
 
 	if len(bits) < 3 {
 		panic("not enough bits for RGB channels")
 	}
 
 	for i := range levels {
-		levels[i] = float32(levelsForBits(bits[i]))
+		levels[i] = levelsForBits(bits[i])
 	}
 
 	return func(clr FloatRGBA) color.RGBA {
 		x := ctx.x
 
-		rF := mat32.RoundToEven((clr.R+ctx.e[0][x][0])*levels[0]) / levels[0]
-		gF := mat32.RoundToEven((clr.G+ctx.e[0][x][1])*levels[1]) / levels[1]
-		bF := mat32.RoundToEven((clr.B+ctx.e[0][x][2])*levels[2]) / levels[2]
+		rF := math.RoundToEven((clr.R+ctx.e[0][x][0])*levels[0]) / levels[0]
+		gF := math.RoundToEven((clr.G+ctx.e[0][x][1])*levels[1]) / levels[1]
+		bF := math.RoundToEven((clr.B+ctx.e[0][x][2])*levels[2]) / levels[2]
 
 		if !config.Flat {
 			eVal := ErrorValue{clr.R - rF, clr.G - gF, clr.B - bF}
