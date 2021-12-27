@@ -16,10 +16,19 @@ import (
 	"github.com/goki/mat32"
 )
 
-var SourceFile = flag.String("in", "img.png", "Source image to process")
-var OutputFile = flag.String("out", "output.png", "Output image file name")
-var WithDiffusion = flag.Bool("dither", true, "FALSE to disable dithering")
-var BT470 = flag.Bool("sd", false, "TRUE to enable SDTV BT.470 luma weights")
+type Config struct {
+	SourceFile, OutputFile string
+	Flat, BT470            bool
+}
+
+var config = Config{}
+
+func init() {
+	flag.StringVar(&config.SourceFile, "in", "img.png", "Source image to process")
+	flag.StringVar(&config.OutputFile, "out", "output.png", "Output image file name")
+	flag.BoolVar(&config.Flat, "flat", false, "Skip dithering")
+	flag.BoolVar(&config.BT470, "sd", false, "Use SDTV BT.470 luma weights instead of BT.703")
+}
 
 const FMUL = 65535.0
 
@@ -43,16 +52,9 @@ func diffuseFloydSteinberg(errorRows *[2][]float32, ox int, yerr float32) {
 	errorRows[1][ox+1] += yerr * (1.0 / 16)
 }
 
-func main() {
-	flag.Parse()
-
-	// make sure parsing worked
-	if SourceFile == nil || OutputFile == nil || BT470 == nil || WithDiffusion == nil {
-		log.Fatal("flag.Parse() -> nil!?")
-	}
-
+func Process(config Config) {
 	// Decode the image data from a file
-	reader, err := os.Open(*SourceFile)
+	reader, err := os.Open(config.SourceFile)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -71,7 +73,7 @@ func main() {
 	o := image.NewRGBA(image.Rect(0, 0, w, h))
 	var errorRows [2][]float32
 	for i := range errorRows {
-		// we are going to make the rows 1 wider, so writing always works
+		// make it 1 wider: no upper bounds check needed
 		errorRows[i] = make([]float32, 1+w)
 	}
 	for y := yMin; y < yMax; y++ {
@@ -92,14 +94,14 @@ func main() {
 			oy := y - yMin
 
 			var y0 float32
-			if *BT470 {
+			if config.BT470 {
 				y0 = float32(0.299*r + 0.587*g + 0.114*b) // BT.470
 			} else {
 				y0 = float32(0.2126*r + 0.7152*g + 0.0722*b) // BT.709
 			}
 			// quantize, with error diffusion included
 			yflr := mat32.RoundToEven((y0+errorRows[0][ox])*15) / 15
-			if *WithDiffusion {
+			if !config.Flat {
 				diffuseFloydSteinberg(&errorRows, ox, y0-yflr)
 			}
 
@@ -114,7 +116,7 @@ func main() {
 	}
 
 	// Open the output
-	writer, err := os.Create(*OutputFile)
+	writer, err := os.Create(config.OutputFile)
 	defer writer.Close()
 
 	// Encode the image to the output
@@ -122,4 +124,9 @@ func main() {
 	if err != nil {
 		log.Fatal("PNG output:", err)
 	}
+}
+
+func main() {
+	flag.Parse()
+	Process(config)
 }
