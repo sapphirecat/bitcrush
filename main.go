@@ -21,6 +21,9 @@ type Config struct {
 	Flat, BT470            bool
 }
 
+type ErrorValue [3]float32
+type Errors [2][]ErrorValue
+
 var config = Config{}
 
 func init() {
@@ -48,14 +51,16 @@ func straightAlphaFloat(c color.Color) (float32, float32, float32, float32) {
 
 // diffuseFloydSteinberg implements the error diffusion algorithm on a window
 // of rows.
-func diffuseFloydSteinberg(errorRows *[2][]float32, ox int, yerr float32) {
-	if ox > 0 {
-		errorRows[1][ox-1] += yerr * (3.0 / 16)
-	}
-	errorRows[1][ox] += yerr * (5.0 / 16)
-	if ox < len(errorRows[0])-1 {
-		errorRows[0][ox+1] += yerr * (7.0 / 16)
-		errorRows[1][ox+1] += yerr * (1.0 / 16)
+func diffuseFloydSteinberg(errorRows *Errors, ox int, errVec ErrorValue) {
+	for i, v := range errVec {
+		if ox > 0 {
+			errorRows[1][ox-1][i] += v * (3.0 / 16)
+		}
+		errorRows[1][ox][i] += v * (5.0 / 16)
+		if ox < len(errorRows[0])-1 {
+			errorRows[0][ox+1][i] += v * (7.0 / 16)
+			errorRows[1][ox+1][i] += v * (1.0 / 16)
+		}
 	}
 }
 
@@ -79,16 +84,16 @@ func Process(config Config) {
 	w := xMax - xMin
 	h := bounds.Max.Y - yMin
 	o := image.NewRGBA(image.Rect(0, 0, w, h))
-	var errorRows [2][]float32
+	var errorRows Errors
 	for i := range errorRows {
-		errorRows[i] = make([]float32, w)
+		errorRows[i] = make([]ErrorValue, w)
 	}
 	for y := yMin; y < yMax; y++ {
 		// slide error diffusion window upward: copy(dst, src)
 		copy(errorRows[0], errorRows[1])
 		// fill newly-available window with 0
 		for i := range errorRows[1] {
-			errorRows[1][i] = 0.0
+			errorRows[1][i] = ErrorValue{}
 		}
 
 		for x := xMin; x < xMax; x++ {
@@ -107,9 +112,10 @@ func Process(config Config) {
 				y0 = float32(0.2126*r + 0.7152*g + 0.0722*b) // BT.709
 			}
 			// quantize, with error diffusion included
-			yflr := mat32.RoundToEven((y0+errorRows[0][ox])*15) / 15
+			yflr := mat32.RoundToEven((y0+errorRows[0][ox][0])*15) / 15
+			delta := y0 - yflr
 			if !config.Flat {
-				diffuseFloydSteinberg(&errorRows, ox, y0-yflr)
+				diffuseFloydSteinberg(&errorRows, ox, ErrorValue{delta, delta, delta})
 			}
 
 			if yflr > 1.0 {
