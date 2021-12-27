@@ -51,8 +51,8 @@ func diffuseBitCrush(errorRows *[2][]float32, ox int, yerr float32) {
 func main() {
 	flag.Parse()
 
-	// make sure this pointer is real
-	if SourceFile == nil || OutputFile == nil {
+	// make sure parsing worked
+	if SourceFile == nil || OutputFile == nil || BT470 == nil || WithDiffusion == nil {
 		log.Fatal("flag.Parse() -> nil!?")
 	}
 
@@ -97,14 +97,14 @@ func main() {
 			oy := y - yMin
 
 			var y0 float32
-			if BT470 != nil && *BT470 {
+			if *BT470 {
 				y0 = float32(0.299*r + 0.587*g + 0.114*b) // BT.470
 			} else {
 				y0 = float32(0.2126*r + 0.7152*g + 0.0722*b) // BT.709
 			}
 			// quantize, with error diffusion included
 			yflr := mat32.RoundToEven((y0+errorRows[0][ox])*15) / 15
-			if WithDiffusion == nil || *WithDiffusion {
+			if *WithDiffusion {
 				diffuseFloydSteinberg(&errorRows, ox, y0-yflr)
 				//diffuseBitCrush(&errorRows, ox, y0-yflr)
 			}
