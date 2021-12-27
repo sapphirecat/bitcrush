@@ -18,13 +18,20 @@ import (
 
 type Config struct {
 	SourceFile, OutputFile string
+	Space                  string
 	Flat, BT470            bool
 }
 
+type PixelQuantizer func(FloatRGBA) color.RGBA
 type ErrorValue [3]float32
 type Errors [2][]ErrorValue
 type FloatRGBA struct {
 	R, G, B, A float32
+}
+
+type dither struct {
+	x int
+	e Errors
 }
 
 var config = Config{}
@@ -32,6 +39,7 @@ var config = Config{}
 func init() {
 	flag.StringVar(&config.SourceFile, "in", "img.png", "Source image to process")
 	flag.StringVar(&config.OutputFile, "out", "output.png", "Output image file name")
+	flag.StringVar(&config.Space, "space", "Y4", "Color space and quantization to use, e.g. RGB332")
 	flag.BoolVar(&config.Flat, "flat", false, "Skip dithering")
 	flag.BoolVar(&config.BT470, "sd", false, "Use SDTV BT.470 luma weights instead of BT.703")
 }
@@ -60,15 +68,56 @@ func straightAlphaFloat(c color.Color) FloatRGBA {
 // diffuseFloydSteinberg implements the error diffusion algorithm on a window
 // of rows.
 func diffuseFloydSteinberg(errorRows *Errors, ox int, errVec ErrorValue) {
+	xMax := len(errorRows[0]) - 1
 	for i, v := range errVec {
+		if v == 0.0 {
+			continue
+		}
+
 		if ox > 0 {
 			errorRows[1][ox-1][i] += v * (3.0 / 16)
 		}
 		errorRows[1][ox][i] += v * (5.0 / 16)
-		if ox < len(errorRows[0])-1 {
+		if ox < xMax {
 			errorRows[0][ox+1][i] += v * (7.0 / 16)
 			errorRows[1][ox+1][i] += v * (1.0 / 16)
 		}
+	}
+}
+
+func levelsForBits(bits int) int {
+	return (1 << bits) - 1
+}
+
+func quantizerGray(bits int, ctx *dither) PixelQuantizer {
+	levels := float32(levelsForBits(bits))
+
+	return func(clr FloatRGBA) color.RGBA {
+		// compute the full-precision grayscale
+		var y0 float32
+		if config.BT470 {
+			y0 = float32(0.299*clr.R + 0.587*clr.G + 0.114*clr.B) // BT.470
+		} else {
+			y0 = float32(0.2126*clr.R + 0.7152*clr.G + 0.0722*clr.B) // BT.709
+		}
+
+		// quantize (0..15 => 16 levels)
+		yflr := mat32.RoundToEven((y0+ctx.e[0][ctx.x][0])*levels) / levels
+		if !config.Flat {
+			// do error diffusion (dither)
+			diffuseFloydSteinberg(&ctx.e, ctx.x, ErrorValue{y0 - yflr})
+		}
+
+		// saturate
+		if yflr > 1.0 {
+			yflr = 1.0
+		} else if yflr < 0.0 {
+			yflr = 0.0
+		}
+
+		// convert to output space
+		yq := uint8(yflr * FMUL8)
+		return color.RGBA{yq, yq, yq, uint8(clr.A * FMUL8)}
 	}
 }
 
@@ -92,54 +141,29 @@ func Process(config Config) {
 	w := xMax - xMin
 	h := bounds.Max.Y - yMin
 	o := image.NewRGBA(image.Rect(0, 0, w, h))
-	var errorRows Errors
-	for i := range errorRows {
-		errorRows[i] = make([]ErrorValue, w)
+	var dCtx dither
+	qFunc := quantizerGray(4, &dCtx)
+
+	for i := range dCtx.e {
+		dCtx.e[i] = make([]ErrorValue, w)
 	}
 	for y := yMin; y < yMax; y++ {
 		// slide error diffusion window upward: copy(dst, src)
-		copy(errorRows[0], errorRows[1])
+		copy(dCtx.e[0], dCtx.e[1])
 		// fill newly-available window with 0
-		for i := range errorRows[1] {
-			errorRows[1][i] = ErrorValue{}
+		for i := range dCtx.e[1] {
+			dCtx.e[1][i] = ErrorValue{}
 		}
 
+		// compute output-relative Y coordinate
+		oy := y - yMin
 		for x := xMin; x < xMax; x++ {
-			clr := straightAlphaFloat(m.At(x, y))
-
-			// compute output-relative X/Y coordinates
+			// compute output-relative X coordinate
 			ox := x - xMin
-			oy := y - yMin
+			dCtx.x = ox
 
-			// compute the full-precision grayscale
-			var y0 float32
-			if config.BT470 {
-				y0 = float32(0.299*clr.R + 0.587*clr.G + 0.114*clr.B) // BT.470
-			} else {
-				y0 = float32(0.2126*clr.R + 0.7152*clr.G + 0.0722*clr.B) // BT.709
-			}
-
-			// quantize (0..15 => 16 levels)
-			yflr := mat32.RoundToEven((y0+errorRows[0][ox][0])*15) / 15
-			if !config.Flat {
-				// do error diffusion (dither)
-				delta := y0 - yflr
-				diffuseFloydSteinberg(&errorRows, ox, ErrorValue{delta, delta, delta})
-			}
-
-			// saturate
-			if yflr > 1.0 {
-				yflr = 1.0
-			} else if yflr < 0.0 {
-				yflr = 0.0
-			}
-
-			// convert to output space
-			yq := uint8(yflr * FMUL8)
-			clrOut := color.RGBA{yq, yq, yq, uint8(clr.A * FMUL8)}
-
-			// set on the output
-			o.Set(ox, oy, clrOut)
+			clr := straightAlphaFloat(m.At(x, y))
+			o.Set(ox, oy, qFunc(clr))
 		}
 	}
 
