@@ -43,11 +43,6 @@ func diffuseFloydSteinberg(errorRows *[2][]float32, ox int, yerr float32) {
 	errorRows[1][ox+1] += yerr * (1.0 / 16)
 }
 
-func diffuseBitCrush(errorRows *[2][]float32, ox int, yerr float32) {
-	errorRows[0][ox+1] += yerr * 0.5
-	errorRows[1][ox] = yerr * 0.5
-}
-
 func main() {
 	flag.Parse()
 
@@ -106,7 +101,6 @@ func main() {
 			yflr := mat32.RoundToEven((y0+errorRows[0][ox])*15) / 15
 			if *WithDiffusion {
 				diffuseFloydSteinberg(&errorRows, ox, y0-yflr)
-				//diffuseBitCrush(&errorRows, ox, y0-yflr)
 			}
 
 			if yflr > 1.0 {
