@@ -179,6 +179,48 @@ func modPositively(n, d float64) float64 {
 	return v
 }
 
+func getHue6(clr FloatRGBA, cMax, delta float64) (h float64) {
+	// hue, based on the max channel; or 0.0 if delta is 0.0
+	// h runs 0.0 to 6.0 (a factor of 60 is ignored in both directions)
+	if delta != 0.0 {
+		if cMax == clr.R {
+			h = modPositively((clr.G-clr.B)/delta, 6.0)
+		} else if cMax == clr.G {
+			h = ((clr.B - clr.R) / delta) + 2
+		} else {
+			// implied: cMax == clr.B
+			h = ((clr.R - clr.G) / delta) + 4
+		}
+	}
+
+	return
+}
+
+func rgbFromHCXM(h, C, X, M float64) (r, g, b float64) {
+	// intermediate values
+	var rP, gP, bP float64
+
+	if h < 1.0 {
+		rP, gP = C, X
+	} else if h < 2.0 {
+		rP, gP = X, C
+	} else if h < 3.0 {
+		gP, bP = C, X
+	} else if h < 4.0 {
+		gP, bP = X, C
+	} else if h < 5.0 {
+		bP, rP = C, X
+	} else {
+		bP, rP = X, C
+	}
+
+	r = rP + M
+	g = gP + M
+	b = bP + M
+
+	return
+}
+
 func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 	var levels [3]float64
 
@@ -200,18 +242,8 @@ func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 
 		var h, s, v float64
 
-		// hue, based on the max channel; or 0.0 if delta is 0.0
-		// h runs 0.0 to 6.0 (a factor of 60 is ignored in both directions)
-		if delta != 0.0 {
-			if cMax == clr.R {
-				h = modPositively((clr.G-clr.B)/delta, 6.0)
-			} else if cMax == clr.G {
-				h = ((clr.B - clr.R) / delta) + 2
-			} else {
-				// implied: cMax == clr.B
-				h = ((clr.R - clr.G) / delta) + 4
-			}
-		}
+		// hue: common with HSL
+		h = getHue6(clr, cMax, delta)
 
 		// saturation: 0 if cMax is 0; otherwise, a division
 		if cMax > 0.0 {
@@ -243,25 +275,72 @@ func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 		X := C * (1 - math.Abs(modPositively(hF, 2.0)-1))
 		M := vF - C
 
-		var rP, gP, bP float64
-		if hF < 1.0 {
-			rP, gP = C, X
-		} else if hF < 2.0 {
-			rP, gP = X, C
-		} else if hF < 3.0 {
-			gP, bP = C, X
-		} else if hF < 4.0 {
-			gP, bP = X, C
-		} else if hF < 5.0 {
-			bP, rP = C, X
-		} else {
-			bP, rP = X, C
-		}
+		// shared with HSL
+		r, g, b := rgbFromHCXM(hF, C, X, M)
 
 		return color.RGBA{
-			R: int8OfFloat(rP + M),
-			G: int8OfFloat(gP + M),
-			B: int8OfFloat(bP + M),
+			R: int8OfFloat(r),
+			G: int8OfFloat(g),
+			B: int8OfFloat(b),
+			A: uint8(clr.A * FMUL8),
+		}
+	}
+}
+
+func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
+	var levels [3]float64
+
+	if len(bits) < 3 {
+		panic("not enough bits for HSL channels")
+	}
+
+	for i := range levels {
+		levels[i] = levelsForBits(bits[i])
+	}
+
+	return func(clr FloatRGBA) color.RGBA {
+		x := ctx.x
+
+		// convert to space
+		cMax := math.Max(clr.R, math.Max(clr.G, clr.B))
+		cMin := math.Min(clr.R, math.Min(clr.G, clr.B))
+		delta := cMax - cMin
+
+		// because l1 look so similar, use t for "lighTness"
+		var h, s, t float64
+
+		h = getHue6(clr, cMax, delta)
+		t = cMax - delta/2
+		if t > 0.0 && t < 1.0 {
+			s = (cMax - t) / math.Min(t, 1.0-t)
+		}
+
+		// quantize
+		hF := math.RoundToEven((h+ctx.e[0][x][0])*levels[0]) / levels[0]
+		sF := math.RoundToEven((s+ctx.e[0][x][1])*levels[1]) / levels[1]
+		tF := math.RoundToEven((t+ctx.e[0][x][2])*levels[2]) / levels[2]
+
+		// clamp to range
+		hF = math.Min(6.0, math.Max(hF, 0.0))
+		sF = math.Min(1.0, math.Max(sF, 0.0))
+		tF = math.Min(1.0, math.Max(tF, 0.0))
+
+		if !config.Flat {
+			eVal := ErrorValue{h - hF, s - sF, t - tF}
+			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
+		}
+
+		// convert back to RGB
+		C := sF * (1 - math.Abs(2*tF-1))
+		X := C * (1 - math.Abs(modPositively(hF, 2)-1))
+		M := tF - C/2
+
+		r, g, b := rgbFromHCXM(hF, C, X, M)
+
+		return color.RGBA{
+			R: int8OfFloat(r),
+			G: int8OfFloat(g),
+			B: int8OfFloat(b),
 			A: uint8(clr.A * FMUL8),
 		}
 	}
@@ -305,6 +384,8 @@ func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
 		builder = quantizerRgb
 	case "HSV":
 		builder = quantizerHsv
+	case "HSL":
+		builder = quantizerHsl
 	default:
 		log.Fatal("Unknown color space: ", m[1])
 	}
