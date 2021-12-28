@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"image"
 	"log"
 	"math"
@@ -16,6 +17,8 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	"image/png"
+
+	"github.com/oelmekki/matrix"
 )
 
 type Config struct {
@@ -88,13 +91,26 @@ func diffuseFloydSteinberg(errorRows *Errors, ox int, errVec ErrorValue) {
 	}
 }
 
-func levelsForBits(bits int) float64 {
+func levelsFromBits(bits int) float64 {
 	if bits < 0 {
 		panic("negative bits requested")
 	}
 
 	levels := (1 << bits) - 1
 	return float64(levels)
+}
+
+func triLevelsFromBits(bits []int, space string) (levels [3]float64) {
+	if len(bits) < 3 {
+		what := fmt.Sprintf("Not enough bits for %s channels (needed 3, got %d", space, len(bits))
+		panic(what)
+	}
+
+	for i := range levels {
+		levels[i] = levelsFromBits(bits[i])
+	}
+
+	return
 }
 
 func int8OfFloat(value float64) uint8 {
@@ -113,7 +129,7 @@ func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
 		panic("not enough bits specified for Y channel")
 	}
 
-	levels := levelsForBits(bits[0])
+	levels := levelsFromBits(bits[0])
 
 	return func(clr FloatRGBA) color.RGBA {
 		// compute the full-precision grayscale
@@ -137,15 +153,7 @@ func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
 }
 
 func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
-	var levels [3]float64
-
-	if len(bits) < 3 {
-		panic("not enough bits for RGB channels")
-	}
-
-	for i := range levels {
-		levels[i] = levelsForBits(bits[i])
-	}
+	levels := triLevelsFromBits(bits, "RGB")
 
 	return func(clr FloatRGBA) color.RGBA {
 		x := ctx.x
@@ -222,15 +230,7 @@ func rgbFromHCXM(h, C, X, M float64) (r, g, b float64) {
 }
 
 func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
-	var levels [3]float64
-
-	if len(bits) < 3 {
-		panic("not enough bits for HSV channels")
-	}
-
-	for i := range levels {
-		levels[i] = levelsForBits(bits[i])
-	}
+	levels := triLevelsFromBits(bits, "HSV")
 
 	return func(clr FloatRGBA) color.RGBA {
 		x := ctx.x
@@ -288,15 +288,7 @@ func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 }
 
 func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
-	var levels [3]float64
-
-	if len(bits) < 3 {
-		panic("not enough bits for HSL channels")
-	}
-
-	for i := range levels {
-		levels[i] = levelsForBits(bits[i])
-	}
+	levels := triLevelsFromBits(bits, "HSL")
 
 	return func(clr FloatRGBA) color.RGBA {
 		x := ctx.x
@@ -346,6 +338,138 @@ func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
 	}
 }
 
+func matrixQuantizer(toSpace, fromSpace matrix.Matrix, levels [3]float64, ctx *dither, config Config) PixelQuantizer {
+	return func(clr FloatRGBA) color.RGBA {
+		rgbIn, err := matrix.Build(matrix.Builder{
+			matrix.Row{clr.R},
+			matrix.Row{clr.G},
+			matrix.Row{clr.B},
+		})
+		if err != nil {
+			panic(err)
+		}
+
+		spaceIn, err := toSpace.DotProduct(rgbIn)
+		if err != nil {
+			panic(err)
+		}
+		// use U, V, W for the channels, because we don't know their real names
+		// and this won't conflict with any of R, G, B for RGB variables
+		u, v, w := spaceIn.At(0, 0), spaceIn.At(1, 0), spaceIn.At(2, 0)
+
+		// quantize
+		x := ctx.x
+		uF := math.RoundToEven((u+ctx.e[0][x][0])*levels[0]) / levels[0]
+		vF := math.RoundToEven((v+ctx.e[0][x][1])*levels[1]) / levels[1]
+		wF := math.RoundToEven((w+ctx.e[0][x][2])*levels[2]) / levels[2]
+
+		if !config.Flat {
+			eVal := ErrorValue{u - uF, v - vF, w - wF}
+			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
+		}
+
+		// convert back to RGB (build matrix, multiply, read)
+		uvwOut, err := matrix.Build(matrix.Builder{
+			matrix.Row{uF},
+			matrix.Row{vF},
+			matrix.Row{wF},
+		})
+		if err != nil {
+			panic(err)
+		}
+
+		spaceOut, err := fromSpace.DotProduct(uvwOut)
+		if err != nil {
+			panic(err)
+		}
+
+		r, g, b := spaceOut.At(0, 0), spaceOut.At(1, 0), spaceOut.At(2, 0)
+
+		return color.RGBA{
+			R: int8OfFloat(r),
+			G: int8OfFloat(g),
+			B: int8OfFloat(b),
+			A: uint8(clr.A * FMUL8),
+		}
+	}
+}
+
+func quantizerYuv(bits []int, ctx *dither, config Config) PixelQuantizer {
+	levels := triLevelsFromBits(bits, "YUV")
+
+	var toYuv, fromYuv matrix.Matrix
+
+	// set up the conversion matrices
+	if config.BT470 {
+		toYuv, _ = matrix.Build(
+			matrix.Builder{
+				matrix.Row{0.299, 0.587, 0.114},
+				matrix.Row{-0.014713, -0.28886, 0.436},
+				matrix.Row{0.615, -0.51499, -1.0001},
+			})
+		fromYuv, _ = matrix.Build(
+			matrix.Builder{
+				matrix.Row{1, 0, 1.13983},
+				matrix.Row{1, -0.39465, -0.58060},
+				matrix.Row{1, 2.03211, 0},
+			})
+	} else {
+		toYuv, _ = matrix.Build(
+			matrix.Builder{
+				matrix.Row{0.2126, 0.7152, 0.0722},
+				matrix.Row{-0.09991, -0.33609, 0.436},
+				matrix.Row{0.615, -0.55861, -0.05639},
+			})
+		fromYuv, _ = matrix.Build(
+			matrix.Builder{
+				matrix.Row{1, 0, 1.28033},
+				matrix.Row{1, -0.21482, -0.38059},
+				matrix.Row{1, 2.12798, 0},
+			})
+	}
+
+	return matrixQuantizer(toYuv, fromYuv, levels, ctx, config)
+}
+
+func quantizerYiq(bits []int, ctx *dither, config Config) PixelQuantizer {
+	levels := triLevelsFromBits(bits, "YIQ")
+
+	var toYiq, fromYiq matrix.Matrix
+
+	// set up the conversion matrices
+	if config.BT470 {
+		toYiq, _ = matrix.Build(
+			matrix.Builder{
+				matrix.Row{0.299, 0.587, 0.114},
+				matrix.Row{0.5959, -0.2746, -0.3213},
+				matrix.Row{0.2115, -0.5227, 0.3112},
+			})
+		fromYiq, _ = matrix.Build(
+			matrix.Builder{
+				matrix.Row{1, 0.956, 0.619},
+				matrix.Row{1, -0.272, -0.647},
+				matrix.Row{1, -1.106, 1.703},
+			})
+	} else {
+		// there is no HDTV YIQ, so this is the FCC NTSC standard instead.
+		// at least this way, "-bt470" keeps meaning the same thing.
+		toYiq, _ = matrix.Build(
+			matrix.Builder{
+				matrix.Row{0.30, 0.59, 0.11},
+				matrix.Row{0.599, -0.2773, -0.3217},
+				matrix.Row{0.213, -0.5251, 0.3121},
+			})
+		fromYiq, _ = matrix.Build(
+			matrix.Builder{
+				matrix.Row{1, 0.9469, 0.6236},
+				matrix.Row{1, -0.2748, -0.6357},
+				matrix.Row{1, -1.1, 1.7},
+			})
+	}
+
+	return matrixQuantizer(toYiq, fromYiq, levels, ctx, config)
+}
+
 func parseBits(channels int, bits []int, from string) []int {
 	if len(from) < channels {
 		log.Fatal("Not enough channels specified in: ", from)
@@ -386,6 +510,10 @@ func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
 		builder = quantizerHsv
 	case "HSL":
 		builder = quantizerHsl
+	case "YUV":
+		builder = quantizerYuv
+	case "YIQ":
+		builder = quantizerYiq
 	default:
 		log.Fatal("Unknown color space: ", m[1])
 	}
