@@ -168,6 +168,105 @@ func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
 	}
 }
 
+func modPositively(n, d float64) float64 {
+	v := math.Mod(n, d)
+	if v < 0.0 {
+		v += d
+	} else if v >= d {
+		v -= d
+	}
+
+	return v
+}
+
+func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
+	var levels [3]float64
+
+	if len(bits) < 3 {
+		panic("not enough bits for HSV channels")
+	}
+
+	for i := range levels {
+		levels[i] = levelsForBits(bits[i])
+	}
+
+	return func(clr FloatRGBA) color.RGBA {
+		x := ctx.x
+
+		// convert to HSV
+		cMax := math.Max(clr.R, math.Max(clr.G, clr.B))
+		cMin := math.Min(clr.R, math.Min(clr.G, clr.B))
+		delta := cMax - cMin
+
+		var h, s, v float64
+
+		// hue, based on the max channel; or 0.0 if delta is 0.0
+		// h runs 0.0 to 6.0 (a factor of 60 is ignored in both directions)
+		if delta != 0.0 {
+			if cMax == clr.R {
+				h = modPositively((clr.G-clr.B)/delta, 6.0)
+			} else if cMax == clr.G {
+				h = ((clr.B - clr.R) / delta) + 2
+			} else {
+				// implied: cMax == clr.B
+				h = ((clr.R - clr.G) / delta) + 4
+			}
+		}
+
+		// saturation: 0 if cMax is 0; otherwise, a division
+		if cMax > 0.0 {
+			s = delta / cMax
+		}
+
+		// value: maximum of any RGB channel
+		v = cMax
+
+		// quantize
+		hF := math.RoundToEven((h+ctx.e[0][x][0])*levels[0]) / levels[0]
+		sF := math.RoundToEven((s+ctx.e[0][x][1])*levels[1]) / levels[1]
+		vF := math.RoundToEven((v+ctx.e[0][x][2])*levels[2]) / levels[2]
+
+		// clamp to range
+		hF = math.Min(6.0, math.Max(hF, 0.0))
+		sF = math.Min(1.0, math.Max(sF, 0.0))
+		vF = math.Min(1.0, math.Max(vF, 0.0))
+
+		if !config.Flat {
+			eVal := ErrorValue{h - hF, s - sF, v - vF}
+			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
+		}
+
+		// convert back to RGB (Wikipedia version)
+		// C = chroma; X = intermediate (second-highest color value); M is to
+		// match value.
+		C := vF * sF
+		X := C * (1 - math.Abs(modPositively(hF, 2.0)-1))
+		M := vF - C
+
+		var rP, gP, bP float64
+		if hF < 1.0 {
+			rP, gP = C, X
+		} else if hF < 2.0 {
+			rP, gP = X, C
+		} else if hF < 3.0 {
+			gP, bP = C, X
+		} else if hF < 4.0 {
+			gP, bP = X, C
+		} else if hF < 5.0 {
+			bP, rP = C, X
+		} else {
+			bP, rP = X, C
+		}
+
+		return color.RGBA{
+			R: int8OfFloat(rP + M),
+			G: int8OfFloat(gP + M),
+			B: int8OfFloat(bP + M),
+			A: uint8(clr.A * FMUL8),
+		}
+	}
+}
+
 func parseBits(channels int, bits []int, from string) []int {
 	if len(from) < channels {
 		log.Fatal("Not enough channels specified in: ", from)
@@ -204,6 +303,8 @@ func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
 		builder = quantizerGray
 	case "RGB":
 		builder = quantizerRgb
+	case "HSV":
+		builder = quantizerHsv
 	default:
 		log.Fatal("Unknown color space: ", m[1])
 	}
