@@ -28,15 +28,15 @@ type Config struct {
 	Flat, BT470            bool
 }
 
-type PixelQuantizer func(FloatRGBA) color.RGBA
+type PixelQuantizer func(FloatNRGBA) color.NRGBA
 type QuantizeBuilder func([]int, *dither, Config) PixelQuantizer
 type LevelsValue [4]float64
 type ErrorValue [4]float64
 type Errors [2][]ErrorValue
 
-// FloatRGBA is an RGB color with straight alpha, all normalized (0.0 to 1.0),
+// FloatNRGBA is an RGB color with straight alpha, all normalized (0.0 to 1.0),
 // and all using float64 because that's what math does.
-type FloatRGBA struct {
+type FloatNRGBA struct {
 	R, G, B, A float64
 }
 
@@ -59,17 +59,17 @@ func init() {
 const FMUL = 65535.0
 
 // FMUL8 is the factor between normalized floats and 8-bit representations,
-// such as color.RGBA
+// such as color.NRGBA
 const FMUL8 = 255.0
 
 // straightAlphaFloat turns a color.Color into normalized float64 components
 // with straight (not premultiplied) alpha.
-func straightAlphaFloat(c color.Color) FloatRGBA {
+func straightAlphaFloat(c color.Color) FloatNRGBA {
 	r, g, b, a := c.RGBA()
 	aDiv := float64(a)
 
 	// for the RGB components, FMUL cancels out: (r/FMUL) / (a/FMUL) = r/a
-	return FloatRGBA{
+	return FloatNRGBA{
 		R: float64(r) / aDiv,
 		G: float64(g) / aDiv,
 		B: float64(b) / aDiv,
@@ -183,7 +183,7 @@ func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
 		levels[1] = levelsFromBitsSingle(bits[1])
 	}
 
-	return func(clr FloatRGBA) color.RGBA {
+	return func(clr FloatNRGBA) color.NRGBA {
 		// compute the full-precision grayscale
 		var y0 float64
 		if config.BT470 {
@@ -202,14 +202,14 @@ func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
 
 		// convert to output space
 		y8 := int8OfFloat(yF)
-		return color.RGBA{R: y8, G: y8, B: y8, A: uint8(aF * FMUL8)}
+		return color.NRGBA{R: y8, G: y8, B: y8, A: uint8(aF * FMUL8)}
 	}
 }
 
 func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
 	levels := levelsFromBits(bits, "RGB[A]")
 
-	return func(clr FloatRGBA) color.RGBA {
+	return func(clr FloatNRGBA) color.NRGBA {
 		ce := ctx.e[0][ctx.x]
 
 		rF := normQuantize(clr.R+ce[0], levels[0])
@@ -222,7 +222,7 @@ func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
 			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
 		}
 
-		return color.RGBA{
+		return color.NRGBA{
 			R: int8OfFloat(rF),
 			G: int8OfFloat(gF),
 			B: int8OfFloat(bF),
@@ -242,7 +242,7 @@ func modPositively(n, d float64) float64 {
 	return v
 }
 
-func getHue6(clr FloatRGBA, cMax, delta float64) (h float64) {
+func getHue6(clr FloatNRGBA, cMax, delta float64) (h float64) {
 	// hue, based on the max channel; or 0.0 if delta is 0.0
 	// h runs 0.0 to 6.0 (a factor of 60 is ignored in both directions)
 	if delta != 0.0 {
@@ -287,7 +287,7 @@ func rgbFromHCXM(h, C, X, M float64) (r, g, b float64) {
 func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 	levels := levelsFromBits(bits, "HSV[A]")
 
-	return func(clr FloatRGBA) color.RGBA {
+	return func(clr FloatNRGBA) color.NRGBA {
 		ce := ctx.e[0][ctx.x]
 
 		// convert to HSV
@@ -329,7 +329,7 @@ func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 		// shared with HSL
 		r, g, b := rgbFromHCXM(hF, C, X, M)
 
-		return color.RGBA{
+		return color.NRGBA{
 			R: int8OfFloat(r),
 			G: int8OfFloat(g),
 			B: int8OfFloat(b),
@@ -341,7 +341,7 @@ func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
 	levels := levelsFromBits(bits, "HSL[A]")
 
-	return func(clr FloatRGBA) color.RGBA {
+	return func(clr FloatNRGBA) color.NRGBA {
 		ce := ctx.e[0][ctx.x]
 
 		// convert to space
@@ -376,7 +376,7 @@ func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
 
 		r, g, b := rgbFromHCXM(hF, C, X, M)
 
-		return color.RGBA{
+		return color.NRGBA{
 			R: int8OfFloat(r),
 			G: int8OfFloat(g),
 			B: int8OfFloat(b),
@@ -386,7 +386,7 @@ func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
 }
 
 func matrixQuantizer(toSpace, fromSpace matrix.Matrix, levels LevelsValue, ctx *dither, config Config) PixelQuantizer {
-	return func(clr FloatRGBA) color.RGBA {
+	return func(clr FloatNRGBA) color.NRGBA {
 		rgbIn, err := matrix.Build(matrix.Builder{
 			matrix.Row{clr.R},
 			matrix.Row{clr.G},
@@ -441,7 +441,7 @@ func matrixQuantizer(toSpace, fromSpace matrix.Matrix, levels LevelsValue, ctx *
 
 		r, g, b := spaceOut.At(0, 0), spaceOut.At(1, 0), spaceOut.At(2, 0)
 
-		return color.RGBA{
+		return color.NRGBA{
 			R: int8OfFloat(r),
 			G: int8OfFloat(g),
 			B: int8OfFloat(b),
@@ -526,11 +526,9 @@ func quantizerYiq(bits []int, ctx *dither, config Config) PixelQuantizer {
 	return matrixQuantizer(toYiq, fromYiq, levels, ctx, config)
 }
 
-func parseBits(channels int, bits []int, from string) []int {
-	if len(from) < channels {
-		log.Fatal("Not enough channels specified in: ", from)
-	} else if len(from) > channels+1 {
-		log.Fatal("Too many channels specified in: ", from)
+func parseBits(channels int, bits []int, from string, space string) []int {
+	if len(from) != channels {
+		log.Fatalf("Channel count mismatch: %d for %s color space", len(from), space)
 	}
 
 	for i := 0; i < channels; i += 1 {
@@ -543,7 +541,7 @@ func parseBits(channels int, bits []int, from string) []int {
 
 		v, err := strconv.Atoi(chr)
 		if err != nil {
-			log.Fatalf("Channel at %d could not be parsed: %s", i, from[i:i+1])
+			log.Fatalf("Channel at %d=\"%s\": %v", i, from[i:i+1], err)
 		}
 
 		bits = append(bits, v)
@@ -562,26 +560,31 @@ func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
 	}
 
 	channels := 3
-	bits := make([]int, 0, 3)
-	switch strings.ToUpper(m[1]) {
-	case "Y", "YA":
-		channels = 1
+	space := strings.ToUpper(m[1])
+	if len(space) == 4 || space == "YA" {
+		space = space[:len(space)-1]
+		channels += 1
+	}
+	switch space {
+	case "Y":
+		channels -= 2
 		builder = quantizerGray
-	case "RGB", "RGBA":
+	case "RGB":
 		builder = quantizerRgb
-	case "HSV", "HSVA":
+	case "HSV":
 		builder = quantizerHsv
-	case "HSL", "HSLA":
+	case "HSL":
 		builder = quantizerHsl
-	case "YUV", "YUVA":
+	case "YUV":
 		builder = quantizerYuv
-	case "YIQ", "YIQA":
+	case "YIQ":
 		builder = quantizerYiq
 	default:
 		log.Fatal("Unknown color space: ", m[1])
 	}
 
-	bits = parseBits(channels, bits, m[2])
+	bits := make([]int, 0, channels)
+	bits = parseBits(channels, bits, m[2], m[1])
 	return builder(bits, ctx, config)
 }
 
