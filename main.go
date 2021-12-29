@@ -21,6 +21,7 @@ import (
 	"github.com/oelmekki/matrix"
 )
 
+// Config contains all command-line options.
 type Config struct {
 	SourceFile, OutputFile string
 	Space                  string
@@ -29,8 +30,12 @@ type Config struct {
 
 type PixelQuantizer func(FloatRGBA) color.RGBA
 type QuantizeBuilder func([]int, *dither, Config) PixelQuantizer
-type ErrorValue [3]float64
+type LevelsValue [4]float64
+type ErrorValue [4]float64
 type Errors [2][]ErrorValue
+
+// FloatRGBA is an RGB color with straight alpha, all normalized (0.0 to 1.0),
+// and all using float64 because that's what math does.
 type FloatRGBA struct {
 	R, G, B, A float64
 }
@@ -50,10 +55,11 @@ func init() {
 	flag.BoolVar(&fConfig.BT470, "sd", false, "Use SDTV BT.470 luma weights instead of BT.703")
 }
 
-// FMUL is the factor between color.RGBA and normalized floats
+// FMUL is the factor between color.Color and normalized floats
 const FMUL = 65535.0
 
-// FMUL8 is the factor between normalized floats and 8-bit representations
+// FMUL8 is the factor between normalized floats and 8-bit representations,
+// such as color.RGBA
 const FMUL8 = 255.0
 
 // straightAlphaFloat turns a color.Color into normalized float64 components
@@ -76,7 +82,8 @@ func straightAlphaFloat(c color.Color) FloatRGBA {
 func diffuseFloydSteinberg(errorRows *Errors, ox int, errVec ErrorValue) {
 	xMax := len(errorRows[0]) - 1
 	for i, v := range errVec {
-		if v == 0.0 {
+		// "v != v" is inlined math.isNaN() to avoid breaking inline-ability
+		if v == 0.0 || v != v {
 			continue
 		}
 
@@ -91,7 +98,7 @@ func diffuseFloydSteinberg(errorRows *Errors, ox int, errVec ErrorValue) {
 	}
 }
 
-func levelsFromBits(bits int) float64 {
+func levelsFromBitsSingle(bits int) float64 {
 	if bits < 0 {
 		panic("negative bits requested")
 	}
@@ -100,16 +107,55 @@ func levelsFromBits(bits int) float64 {
 	return float64(levels)
 }
 
-func triLevelsFromBits(bits []int, space string) (levels [3]float64) {
+func levelsFromBits(bits []int, space string) (levels LevelsValue) {
 	if len(bits) < 3 {
-		what := fmt.Sprintf("Not enough bits for %s channels (needed 3, got %d", space, len(bits))
+		what := fmt.Sprintf("Not enough bits for %s channels (needed 4, got %d", space, len(bits))
 		panic(what)
 	}
 
-	for i := range levels {
-		levels[i] = levelsFromBits(bits[i])
+	end := len(bits)
+	if end > len(levels) {
+		end = len(levels)
+	}
+	for i := 0; i < end; i += 1 {
+		levels[i] = levelsFromBitsSingle(bits[i])
 	}
 
+	return
+}
+
+// normQuantize quantizes a float to levels in the 0.0-1.0 range.  vErr is the
+// value with error added; levels is the number of quantization levels, or zero
+// for no quantization.
+func normQuantize(vErr float64, levels float64) (out float64) {
+	if levels == 0.0 {
+		// no levels => passthru
+		out = vErr
+	} else if levels == 1 {
+		// 1 level = "black or white"
+		out = math.RoundToEven(vErr)
+	} else {
+		// multiple levels; do full calculation
+		out = math.RoundToEven(levels*vErr) / levels
+	}
+
+	out = math.Min(1.0, math.Max(0.0, out))
+	return
+}
+
+// limitQuantize quantizes a float to levels in an arbitrary range.  vErr is the
+// value with error added; levels is the number of quantization levels, or zero
+// for no quantization.
+func limitQuantize(vErr, min, max float64, levels float64) (out float64) {
+	if levels == 0.0 {
+		out = vErr
+	} else if levels == 1 {
+		out = math.RoundToEven(vErr)
+	} else {
+		out = math.RoundToEven(levels*vErr) / levels
+	}
+
+	out = math.Min(max, math.Max(min, out))
 	return
 }
 
@@ -129,7 +175,13 @@ func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
 		panic("not enough bits specified for Y channel")
 	}
 
-	levels := levelsFromBits(bits[0])
+	levels := [2]float64{
+		levelsFromBitsSingle(bits[0]),
+		0.0,
+	}
+	if len(bits) > 1 {
+		levels[1] = levelsFromBitsSingle(bits[1])
+	}
 
 	return func(clr FloatRGBA) color.RGBA {
 		// compute the full-precision grayscale
@@ -141,29 +193,32 @@ func quantizerGray(bits []int, ctx *dither, config Config) PixelQuantizer {
 		}
 
 		// quantize
-		yflr := math.RoundToEven((y0+ctx.e[0][ctx.x][0])*levels) / levels
+		ce := ctx.e[0][ctx.x] // current error
+		yF := normQuantize(y0+ce[0], levels[0])
+		aF := normQuantize(clr.A+ce[1], levels[1])
 		if !config.Flat {
-			diffuseFloydSteinberg(&ctx.e, ctx.x, ErrorValue{y0 - yflr})
+			diffuseFloydSteinberg(&ctx.e, ctx.x, ErrorValue{y0 - yF, clr.A - aF})
 		}
 
 		// convert to output space
-		yq := int8OfFloat(yflr)
-		return color.RGBA{R: yq, G: yq, B: yq, A: uint8(clr.A * FMUL8)}
+		y8 := int8OfFloat(yF)
+		return color.RGBA{R: y8, G: y8, B: y8, A: uint8(aF * FMUL8)}
 	}
 }
 
 func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
-	levels := triLevelsFromBits(bits, "RGB")
+	levels := levelsFromBits(bits, "RGB[A]")
 
 	return func(clr FloatRGBA) color.RGBA {
-		x := ctx.x
+		ce := ctx.e[0][ctx.x]
 
-		rF := math.RoundToEven((clr.R+ctx.e[0][x][0])*levels[0]) / levels[0]
-		gF := math.RoundToEven((clr.G+ctx.e[0][x][1])*levels[1]) / levels[1]
-		bF := math.RoundToEven((clr.B+ctx.e[0][x][2])*levels[2]) / levels[2]
+		rF := normQuantize(clr.R+ce[0], levels[0])
+		gF := normQuantize(clr.G+ce[1], levels[1])
+		bF := normQuantize(clr.B+ce[2], levels[2])
+		aF := normQuantize(clr.A+ce[3], levels[3])
 
 		if !config.Flat {
-			eVal := ErrorValue{clr.R - rF, clr.G - gF, clr.B - bF}
+			eVal := ErrorValue{clr.R - rF, clr.G - gF, clr.B - bF, clr.A - aF}
 			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
 		}
 
@@ -171,7 +226,7 @@ func quantizerRgb(bits []int, ctx *dither, config Config) PixelQuantizer {
 			R: int8OfFloat(rF),
 			G: int8OfFloat(gF),
 			B: int8OfFloat(bF),
-			A: uint8(clr.A * FMUL8),
+			A: uint8(aF * FMUL8),
 		}
 	}
 }
@@ -230,10 +285,10 @@ func rgbFromHCXM(h, C, X, M float64) (r, g, b float64) {
 }
 
 func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
-	levels := triLevelsFromBits(bits, "HSV")
+	levels := levelsFromBits(bits, "HSV[A]")
 
 	return func(clr FloatRGBA) color.RGBA {
-		x := ctx.x
+		ce := ctx.e[0][ctx.x]
 
 		// convert to HSV
 		cMax := math.Max(clr.R, math.Max(clr.G, clr.B))
@@ -254,17 +309,13 @@ func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 		v = cMax
 
 		// quantize
-		hF := math.RoundToEven((h+ctx.e[0][x][0])*levels[0]) / levels[0]
-		sF := math.RoundToEven((s+ctx.e[0][x][1])*levels[1]) / levels[1]
-		vF := math.RoundToEven((v+ctx.e[0][x][2])*levels[2]) / levels[2]
-
-		// clamp to range
-		hF = math.Min(6.0, math.Max(hF, 0.0))
-		sF = math.Min(1.0, math.Max(sF, 0.0))
-		vF = math.Min(1.0, math.Max(vF, 0.0))
+		hF := limitQuantize(h+ce[0], 0.0, 6.0, levels[0])
+		sF := normQuantize(s+ce[1], levels[1])
+		vF := normQuantize(v+ce[2], levels[2])
+		aF := normQuantize(clr.A+ce[3], levels[3])
 
 		if !config.Flat {
-			eVal := ErrorValue{h - hF, s - sF, v - vF}
+			eVal := ErrorValue{h - hF, s - sF, v - vF, clr.A - aF}
 			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
 		}
 
@@ -282,16 +333,16 @@ func quantizerHsv(bits []int, ctx *dither, config Config) PixelQuantizer {
 			R: int8OfFloat(r),
 			G: int8OfFloat(g),
 			B: int8OfFloat(b),
-			A: uint8(clr.A * FMUL8),
+			A: uint8(aF * FMUL8),
 		}
 	}
 }
 
 func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
-	levels := triLevelsFromBits(bits, "HSL")
+	levels := levelsFromBits(bits, "HSL[A]")
 
 	return func(clr FloatRGBA) color.RGBA {
-		x := ctx.x
+		ce := ctx.e[0][ctx.x]
 
 		// convert to space
 		cMax := math.Max(clr.R, math.Max(clr.G, clr.B))
@@ -308,17 +359,13 @@ func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
 		}
 
 		// quantize
-		hF := math.RoundToEven((h+ctx.e[0][x][0])*levels[0]) / levels[0]
-		sF := math.RoundToEven((s+ctx.e[0][x][1])*levels[1]) / levels[1]
-		tF := math.RoundToEven((t+ctx.e[0][x][2])*levels[2]) / levels[2]
-
-		// clamp to range
-		hF = math.Min(6.0, math.Max(hF, 0.0))
-		sF = math.Min(1.0, math.Max(sF, 0.0))
-		tF = math.Min(1.0, math.Max(tF, 0.0))
+		hF := limitQuantize(h+ce[0], 0.0, 6.0, levels[0])
+		sF := normQuantize(s+ce[1], levels[1])
+		tF := normQuantize(t+ce[2], levels[2])
+		aF := normQuantize(clr.A+ce[3], levels[3])
 
 		if !config.Flat {
-			eVal := ErrorValue{h - hF, s - sF, t - tF}
+			eVal := ErrorValue{h - hF, s - sF, t - tF, clr.A - aF}
 			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
 		}
 
@@ -333,12 +380,12 @@ func quantizerHsl(bits []int, ctx *dither, config Config) PixelQuantizer {
 			R: int8OfFloat(r),
 			G: int8OfFloat(g),
 			B: int8OfFloat(b),
-			A: uint8(clr.A * FMUL8),
+			A: uint8(aF * FMUL8),
 		}
 	}
 }
 
-func matrixQuantizer(toSpace, fromSpace matrix.Matrix, levels [3]float64, ctx *dither, config Config) PixelQuantizer {
+func matrixQuantizer(toSpace, fromSpace matrix.Matrix, levels LevelsValue, ctx *dither, config Config) PixelQuantizer {
 	return func(clr FloatRGBA) color.RGBA {
 		rgbIn, err := matrix.Build(matrix.Builder{
 			matrix.Row{clr.R},
@@ -354,17 +401,26 @@ func matrixQuantizer(toSpace, fromSpace matrix.Matrix, levels [3]float64, ctx *d
 			panic(err)
 		}
 		// use U, V, W for the channels, because we don't know their real names
-		// and this won't conflict with any of R, G, B for RGB variables
+		// and this won't conflict with any of R, G, B, A for RGBA variables
 		u, v, w := spaceIn.At(0, 0), spaceIn.At(1, 0), spaceIn.At(2, 0)
 
-		// quantize
-		x := ctx.x
-		uF := math.RoundToEven((u+ctx.e[0][x][0])*levels[0]) / levels[0]
-		vF := math.RoundToEven((v+ctx.e[0][x][1])*levels[1]) / levels[1]
-		wF := math.RoundToEven((w+ctx.e[0][x][2])*levels[2]) / levels[2]
+		// quantize without range clamping, because we don't know that info;
+		// also, be careful to support passthrough (levels[i]==0.0)
+		ce := ctx.e[0][ctx.x]
+		uF, vF, wF := u+ce[0], v+ce[1], w+ce[2]
+		if levels[0] > 0.0 {
+			uF = math.RoundToEven(uF*levels[0]) / levels[0]
+		}
+		if levels[1] > 0.0 {
+			vF = math.RoundToEven(vF*levels[1]) / levels[1]
+		}
+		if levels[2] > 0.0 {
+			wF = math.RoundToEven(wF*levels[2]) / levels[2]
+		}
+		aF := normQuantize(clr.A+ce[3], levels[3])
 
 		if !config.Flat {
-			eVal := ErrorValue{u - uF, v - vF, w - wF}
+			eVal := ErrorValue{u - uF, v - vF, w - wF, clr.A - aF}
 			diffuseFloydSteinberg(&ctx.e, ctx.x, eVal)
 		}
 
@@ -389,13 +445,13 @@ func matrixQuantizer(toSpace, fromSpace matrix.Matrix, levels [3]float64, ctx *d
 			R: int8OfFloat(r),
 			G: int8OfFloat(g),
 			B: int8OfFloat(b),
-			A: uint8(clr.A * FMUL8),
+			A: uint8(aF * FMUL8),
 		}
 	}
 }
 
 func quantizerYuv(bits []int, ctx *dither, config Config) PixelQuantizer {
-	levels := triLevelsFromBits(bits, "YUV")
+	levels := levelsFromBits(bits, "YUV[A]")
 
 	var toYuv, fromYuv matrix.Matrix
 
@@ -432,7 +488,7 @@ func quantizerYuv(bits []int, ctx *dither, config Config) PixelQuantizer {
 }
 
 func quantizerYiq(bits []int, ctx *dither, config Config) PixelQuantizer {
-	levels := triLevelsFromBits(bits, "YIQ")
+	levels := levelsFromBits(bits, "YIQ[A]")
 
 	var toYiq, fromYiq matrix.Matrix
 
@@ -473,12 +529,19 @@ func quantizerYiq(bits []int, ctx *dither, config Config) PixelQuantizer {
 func parseBits(channels int, bits []int, from string) []int {
 	if len(from) < channels {
 		log.Fatal("Not enough channels specified in: ", from)
-	} else if len(from) > channels {
+	} else if len(from) > channels+1 {
 		log.Fatal("Too many channels specified in: ", from)
 	}
 
 	for i := 0; i < channels; i += 1 {
-		v, err := strconv.Atoi(from[i : i+1])
+		chr := from[i : i+1]
+		if chr == "_" {
+			// explicit pass-through: 0 bits => 0 levels => not quantized
+			bits = append(bits, 0)
+			continue
+		}
+
+		v, err := strconv.Atoi(chr)
 		if err != nil {
 			log.Fatalf("Channel at %d could not be parsed: %s", i, from[i:i+1])
 		}
@@ -490,7 +553,7 @@ func parseBits(channels int, bits []int, from string) []int {
 }
 
 func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
-	re := regexp.MustCompile(`^(?i)([a-z]+)([1-9]+)$`)
+	re := regexp.MustCompile(`^(?i)([a-z]+)([1-9_]+)$`)
 	var builder QuantizeBuilder
 
 	m := re.FindStringSubmatch(config.Space)
@@ -501,18 +564,18 @@ func resolveQuantizer(ctx *dither, config Config) PixelQuantizer {
 	channels := 3
 	bits := make([]int, 0, 3)
 	switch strings.ToUpper(m[1]) {
-	case "Y":
+	case "Y", "YA":
 		channels = 1
 		builder = quantizerGray
-	case "RGB":
+	case "RGB", "RGBA":
 		builder = quantizerRgb
-	case "HSV":
+	case "HSV", "HSVA":
 		builder = quantizerHsv
-	case "HSL":
+	case "HSL", "HSLA":
 		builder = quantizerHsl
-	case "YUV":
+	case "YUV", "YUVA":
 		builder = quantizerYuv
-	case "YIQ":
+	case "YIQ", "YIQA":
 		builder = quantizerYiq
 	default:
 		log.Fatal("Unknown color space: ", m[1])
