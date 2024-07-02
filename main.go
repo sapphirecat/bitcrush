@@ -18,7 +18,7 @@ import (
 	_ "image/jpeg"
 	"image/png"
 
-	"github.com/oelmekki/matrix"
+	"gitlab.com/oelmekki/matrix"
 )
 
 // Config contains all command-line options.
